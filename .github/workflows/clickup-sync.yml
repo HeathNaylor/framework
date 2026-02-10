@@ -1,0 +1,97 @@
+name: Sync PR to ClickUp
+
+on:
+  pull_request_target:
+    types: [opened, closed]
+
+jobs:
+  sync-to-clickup:
+    # Only run for PRs opened by the fork owner
+    if: github.event.pull_request.user.login == 'HeathNaylor'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create or update ClickUp task
+        uses: actions/github-script@v7
+        env:
+          CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
+          CLICKUP_LIST_ID: "901710781231"
+          CLICKUP_ASSIGNEE_ID: "192274160"
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const action = context.payload.action;
+            const token = process.env.CLICKUP_API_TOKEN;
+            const listId = process.env.CLICKUP_LIST_ID;
+            const assigneeId = process.env.CLICKUP_ASSIGNEE_ID;
+
+            const headers = {
+              'Authorization': token,
+              'Content-Type': 'application/json',
+            };
+
+            const taskName = `${pr.title} (#${pr.number})`;
+
+            // Check if a task for this PR already exists
+            const searchRes = await fetch(
+              `https://api.clickup.com/api/v2/list/${listId}/task?include_closed=true`,
+              { headers }
+            );
+            const searchData = await searchRes.json();
+            const existing = searchData.tasks?.find(t => t.name.includes(`#${pr.number})`));
+
+            if (action === 'opened') {
+              if (existing) {
+                core.info(`Task already exists for PR #${pr.number}: ${existing.id}`);
+                return;
+              }
+
+              const description = [
+                `**Pull Request:** ${pr.html_url}`,
+                `**Branch:** \`${pr.head.ref}\` → \`${pr.base.ref}\``,
+                `**Repository:** ${pr.base.repo.full_name}`,
+                '',
+                '---',
+                '',
+                pr.body || '_No description provided._',
+              ].join('\n');
+
+              const body = {
+                name: taskName,
+                description: description,
+                assignees: [parseInt(assigneeId)],
+                status: 'waiting for review',
+                tags: ['pull-request'],
+              };
+
+              const createRes = await fetch(
+                `https://api.clickup.com/api/v2/list/${listId}/task`,
+                { method: 'POST', headers, body: JSON.stringify(body) }
+              );
+              const task = await createRes.json();
+
+              if (task.id) {
+                core.info(`Created ClickUp task: ${task.id} — ${task.name}`);
+                core.info(`URL: ${task.url}`);
+              } else {
+                core.setFailed(`Failed to create task: ${JSON.stringify(task)}`);
+              }
+
+            } else if (action === 'closed') {
+              if (!existing) {
+                core.info(`No existing task found for PR #${pr.number}, skipping.`);
+                return;
+              }
+
+              const newStatus = pr.merged ? 'done' : 'todo';
+              const updateRes = await fetch(
+                `https://api.clickup.com/api/v2/task/${existing.id}`,
+                {
+                  method: 'PUT',
+                  headers,
+                  body: JSON.stringify({ status: newStatus }),
+                }
+              );
+              const updated = await updateRes.json();
+              const label = pr.merged ? 'merged → done' : 'closed → todo';
+              core.info(`Updated task ${existing.id} status to "${newStatus}" (PR ${label})`);
+            }
